@@ -22,13 +22,25 @@ describe("cadastro e consulta", () => {
     expect(t.provider.registered).toEqual([`alfalog/${CODE}`]);
   });
 
-  it("cadastrar o mesmo código de novo devolve o envio existente", async () => {
+  it("cadastrar o mesmo código de novo devolve o envio existente e confirma o cadastro no agregador", async () => {
     const t = setup();
     const id = await registered(t);
     const again = await t.post("/shipments", { carrier: "alfalog", tracking_code: CODE.toLowerCase() });
     expect(again.status).toBe(200);
     expect((await json(again)).id).toBe(id);
-    expect(t.provider.registered).toHaveLength(1);
+    expect(t.provider.registered).toEqual([`alfalog/${CODE}`, `alfalog/${CODE}`]);
+  });
+
+  it("agregador fora do ar no cadastro: nada é gravado e repetir o POST depois funciona", async () => {
+    const t = setup();
+    t.provider.failNext = new ProviderError("agregador indisponível: fetch failed", true);
+    const failed = await t.post("/shipments", { carrier: "alfalog", tracking_code: CODE });
+    expect(failed.status).toBe(502);
+    expect(await json(failed)).toMatchObject({ error: "agregador_falhou", retryable: true });
+    expect(t.db.prepare("SELECT COUNT(*) AS n FROM shipments").get()).toEqual({ n: 0 });
+
+    const retried = await t.post("/shipments", { carrier: "alfalog", tracking_code: CODE });
+    expect(retried.status).toBe(201);
   });
 
   it("consultar de novo o mesmo código não duplica o histórico", async () => {
@@ -231,6 +243,7 @@ describe("robustez", () => {
     const first = await t.post("/jobs/check-delays");
     expect(first.status).toBe(200);
     expect(t.notified).toHaveLength(0);
+    expect(t.logged).toEqual([expect.objectContaining({ msg: "alert.notify_failed" })]);
     await t.post("/jobs/check-delays");
     expect(t.notified).toHaveLength(1);
     const shipment = await json(await t.get(`/shipments/${id}`));
@@ -268,6 +281,23 @@ describe("robustez", () => {
     );
     const body = await json<{ shipment: ShipmentLike }>(await t.post(`/shipments/${id}/refresh`));
     expect(body.shipment.status).toBe("out_for_delivery");
+  });
+
+  it("evento com horário sem fuso é descartado e contado, porque não dá para saber o instante", async () => {
+    const t = setup();
+    const id = await registered(t);
+    t.provider.push("alfalog", CODE, posted, {
+      externalId: "x3",
+      occurredAt: "2026-03-05T09:00:00",
+      rawStatus: "04",
+      description: null,
+      location: null,
+    });
+    const body = await json<{ skipped_events: number; shipment: ShipmentLike }>(
+      await t.post(`/shipments/${id}/refresh`),
+    );
+    expect(body.skipped_events).toBe(1);
+    expect(body.shipment.status).toBe("posted");
   });
 
   it("dois cadastros simultâneos do mesmo código não criam dois envios", async () => {

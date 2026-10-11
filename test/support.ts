@@ -1,7 +1,7 @@
 import type { ProviderError, ProviderEvent, ProviderTracking, TrackingProvider } from "../src/aggregator/types.ts";
 import { createApp } from "../src/app.ts";
 import { openDatabase } from "../src/db.ts";
-import type { Alert, Notifier } from "../src/shipments.ts";
+import type { Alert, Logger, Notifier } from "../src/shipments.ts";
 
 /**
  * Outra implementação de TrackingProvider, com formato próprio e sem HTTP.
@@ -10,19 +10,24 @@ import type { Alert, Notifier } from "../src/shipments.ts";
 export class InMemoryProvider implements TrackingProvider {
   readonly registered: string[] = [];
   private readonly events = new Map<string, ProviderEvent[]>();
+  /** A próxima chamada (cadastro ou consulta) falha com este erro. */
   failNext: ProviderError | null = null;
 
   async register(code: string, carrier: string): Promise<void> {
+    this.throwIfFailing();
     this.registered.push(`${carrier}/${code}`);
   }
 
   async fetchTracking(code: string, carrier: string): Promise<ProviderTracking> {
-    if (this.failNext) {
-      const error = this.failNext;
-      this.failNext = null;
-      throw error;
-    }
+    this.throwIfFailing();
     return { code, carrier, events: [...(this.events.get(`${carrier}/${code}`) ?? [])] };
+  }
+
+  private throwIfFailing() {
+    if (!this.failNext) return;
+    const error = this.failNext;
+    this.failNext = null;
+    throw error;
   }
 
   parseWebhook(body: unknown): ProviderTracking {
@@ -56,6 +61,8 @@ export function setup(options: { startAt?: string; defaultMaxTransitDays?: numbe
   const db = openDatabase(":memory:");
   const provider = new InMemoryProvider();
   const notified: Alert[] = [];
+  const logged: Array<Record<string, unknown>> = [];
+  const logger: Logger = { error: (entry) => logged.push(entry) };
   let failuresLeft = options.failNotifications ?? 0;
   const notifier: Notifier = {
     notify: (alert) => {
@@ -70,6 +77,7 @@ export function setup(options: { startAt?: string; defaultMaxTransitDays?: numbe
     db,
     provider,
     notifier,
+    logger,
     clock: { now: () => new Date(current) },
     defaultMaxTransitDays: options.defaultMaxTransitDays ?? 7,
   });
@@ -84,6 +92,7 @@ export function setup(options: { startAt?: string; defaultMaxTransitDays?: numbe
     db,
     provider,
     notified,
+    logged,
     post,
     get: (path: string) => app.request(path),
     setNow(iso: string) {

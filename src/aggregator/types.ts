@@ -3,7 +3,7 @@
 export type ProviderEvent = {
   /** Id do evento no agregador, quando existe. */
   externalId: string | null;
-  /** Quando aconteceu, no relógio da transportadora. */
+  /** Quando aconteceu, no relógio da transportadora: ISO-8601 com fuso (`Z` ou `-03:00`). Sem fuso, é descartado. */
   occurredAt: string;
   /** Código da transportadora, do jeito que veio. */
   rawStatus: string;
@@ -13,6 +13,7 @@ export type ProviderEvent = {
 
 export type ProviderTracking = {
   code: string;
+  /** Nome interno da transportadora (`alfalog`), já traduzido do agregador. */
   carrier: string;
   events: ProviderEvent[];
   /** Eventos descartados por formato inválido. */

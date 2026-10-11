@@ -3,7 +3,7 @@ import { type Context, Hono } from "hono";
 import type { TrackingProvider } from "./aggregator/types.ts";
 import { type Clock, systemClock } from "./clock.ts";
 import { DomainError } from "./errors.ts";
-import { createShipmentService, type Notifier } from "./shipments.ts";
+import { createShipmentService, type Logger, type Notifier } from "./shipments.ts";
 
 async function readJson(c: Context): Promise<unknown> {
   try {
@@ -18,6 +18,7 @@ export function createApp(deps: {
   provider: TrackingProvider;
   clock?: Clock;
   notifier?: Notifier;
+  logger?: Logger;
   defaultMaxTransitDays?: number;
 }) {
   const shipments = createShipmentService({ ...deps, clock: deps.clock ?? systemClock });

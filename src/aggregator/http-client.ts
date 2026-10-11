@@ -3,22 +3,42 @@
 //   POST /v2/trackers                    { code, courier }      → 201 (ou 409 se já existe)
 //   GET  /v2/trackers/:courier/:code                            → 200 { data: { code, courier, checkpoints[] } }
 //   webhook                              { event: "tracker.updated", data: { ...igual ao GET } }
+//
+// O agregador chama a transportadora pelo slug dele (`alfa-log`) e manda horários ISO-8601 com fuso.
+// Aqui o slug vira o nome interno (`alfalog`), e checkpoint sem fuso é descartado: sem fuso, não dá
+// para saber em que instante aconteceu.
 
+import { parseInstant } from "../instant.ts";
 import { ProviderError, type ProviderEvent, type ProviderTracking, type TrackingProvider } from "./types.ts";
 
 type FetchFn = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** Nome interno da transportadora → slug no agregador. Trocar de agregador troca esta tabela. */
+export const COURIER_BY_CARRIER: Readonly<Record<string, string>> = {
+  alfalog: "alfa-log",
+  betaexpress: "beta-express",
+  gamaentregas: "gama-entregas",
+};
+const CARRIER_BY_COURIER = new Map(Object.entries(COURIER_BY_CARRIER).map(([carrier, courier]) => [courier, carrier]));
+
+function courierFor(carrier: string): string {
+  const courier = Object.hasOwn(COURIER_BY_CARRIER, carrier) ? COURIER_BY_CARRIER[carrier] : undefined;
+  if (!courier) throw new ProviderError(`transportadora sem correspondente no agregador: ${carrier}`, false);
+  return courier;
+}
 
 export class HttpAggregatorClient implements TrackingProvider {
   constructor(private readonly options: { baseUrl: string; apiKey: string; fetch?: FetchFn; timeoutMs?: number }) {}
 
   async register(code: string, carrier: string): Promise<void> {
-    const res = await this.request("POST", "/v2/trackers", { code, courier: carrier });
+    const res = await this.request("POST", "/v2/trackers", { code, courier: courierFor(carrier) });
     if (res.status === 201 || res.status === 409) return;
     throw this.failure(res);
   }
 
   async fetchTracking(code: string, carrier: string): Promise<ProviderTracking> {
-    const res = await this.request("GET", `/v2/trackers/${encodeURIComponent(carrier)}/${encodeURIComponent(code)}`);
+    const courier = encodeURIComponent(courierFor(carrier));
+    const res = await this.request("GET", `/v2/trackers/${courier}/${encodeURIComponent(code)}`);
     if (res.status !== 200) throw this.failure(res);
     const body = (await res.json().catch(() => null)) as { data?: unknown } | null;
     return parseTracker(body?.data);
@@ -69,19 +89,15 @@ export function parseTracker(data: unknown): ProviderTracking {
   if (typeof tracker.code !== "string" || typeof tracker.courier !== "string" || !Array.isArray(tracker.checkpoints)) {
     throw new ProviderError("tracker sem code, courier ou checkpoints", false);
   }
+  const carrier = CARRIER_BY_COURIER.get(tracker.courier);
+  if (!carrier) throw new ProviderError(`transportadora desconhecida no agregador: ${tracker.courier}`, false);
   // Um checkpoint malformado não derruba os outros: é descartado e contado.
   const events: ProviderEvent[] = [];
   let skipped = 0;
   for (const raw of tracker.checkpoints) {
     const cp = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
-    const occurredAt = cp && typeof cp.time === "string" ? new Date(cp.time) : null;
-    if (
-      !cp ||
-      !occurredAt ||
-      Number.isNaN(occurredAt.getTime()) ||
-      typeof cp.courier_status !== "string" ||
-      cp.courier_status.trim() === ""
-    ) {
+    const occurredAt = cp ? parseInstant(cp.time) : null;
+    if (!cp || !occurredAt || typeof cp.courier_status !== "string" || cp.courier_status.trim() === "") {
       skipped += 1;
       continue;
     }
@@ -94,5 +110,5 @@ export function parseTracker(data: unknown): ProviderTracking {
       location: location || null,
     });
   }
-  return { code: tracker.code, carrier: tracker.courier, events, skipped };
+  return { code: tracker.code, carrier, events, skipped };
 }

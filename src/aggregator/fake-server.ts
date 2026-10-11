@@ -14,6 +14,9 @@ type Checkpoint = {
 
 type Tracker = { tracker_id: string; code: string; courier: string; checkpoints: Checkpoint[] };
 
+// Slugs que o agregador conhece. Os nomes internos (alfalog etc.) não aparecem aqui.
+const COURIERS = new Set(["alfa-log", "beta-express", "gama-entregas"]);
+
 export function createFakeAggregator({ apiKey }: { apiKey: string }) {
   const trackers = new Map<string, Tracker>();
   const key = (courier: string, code: string) => `${courier}/${code}`;
@@ -27,6 +30,7 @@ export function createFakeAggregator({ apiKey }: { apiKey: string }) {
   app.post("/v2/trackers", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { code?: string; courier?: string };
     if (!body.code || !body.courier) return c.json({ error: "code and courier are required" }, 400);
+    if (!COURIERS.has(body.courier)) return c.json({ error: "unknown courier" }, 422);
     if (trackers.has(key(body.courier, body.code))) return c.json({ error: "already exists" }, 409);
     const tracker = { tracker_id: `trk_${trackers.size + 1}`, code: body.code, courier: body.courier, checkpoints: [] };
     trackers.set(key(body.courier, body.code), tracker);

@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 export function openDatabase(path: string): DatabaseSync {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON;");
+  // Outra conexão no mesmo arquivo espera a vez (até 5 s) em vez de falhar na hora com "database is locked".
+  db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
   return db;
 }

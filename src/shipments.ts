@@ -4,6 +4,7 @@ import { ProviderError, type ProviderTracking, type TrackingProvider } from "./a
 import type { Clock } from "./clock.ts";
 import { evaluateDelay } from "./delay.ts";
 import { DomainError } from "./errors.ts";
+import { parseInstant } from "./instant.ts";
 import { normalizeStatus, SUPPORTED_CARRIERS } from "./normalize.ts";
 import { deriveStatus, STATUS_LABELS, type Status } from "./status.ts";
 
@@ -61,6 +62,10 @@ export const consoleNotifier: Notifier = {
   notify: (alert) => console.log(JSON.stringify({ msg: "shipment.delayed", ...alert })),
 };
 
+export type Logger = { error(entry: Record<string, unknown>): void };
+
+export const consoleLogger: Logger = { error: (entry) => console.error(JSON.stringify(entry)) };
+
 const CODE_RE = /^[A-Za-z0-9-]{5,40}$/;
 
 function fingerprint(event: {
@@ -84,6 +89,7 @@ export function createShipmentService({
   clock,
   provider,
   notifier = consoleNotifier,
+  logger = consoleLogger,
   defaultMaxTransitDays = 7,
   newId = () => crypto.randomUUID(),
 }: {
@@ -91,6 +97,7 @@ export function createShipmentService({
   clock: Clock;
   provider: TrackingProvider;
   notifier?: Notifier;
+  logger?: Logger;
   defaultMaxTransitDays?: number;
   newId?: () => string;
 }) {
@@ -208,9 +215,7 @@ export function createShipmentService({
       notifier.notify({ ...alert, carrier: row.carrier, tracking_code: row.tracking_code });
       db.prepare("UPDATE alerts SET notified_at = ? WHERE id = ?").run(clock.now().toISOString(), alert.id);
     } catch (error) {
-      if (!process.env.VITEST) {
-        console.error(JSON.stringify({ msg: "alert.notify_failed", alert_id: alert.id, error: String(error) }));
-      }
+      logger.error({ msg: "alert.notify_failed", alert_id: alert.id, error: String(error) });
     }
   }
 
@@ -233,9 +238,9 @@ export function createShipmentService({
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const event of tracking.events) {
-        // Comparamos strings ISO, então tudo vai para UTC antes.
-        const occurred = new Date(event.occurredAt);
-        if (Number.isNaN(occurred.getTime())) {
+        // Comparamos strings ISO, então tudo vai para UTC antes. Horário sem fuso não dá para comparar: fica de fora.
+        const occurred = parseInstant(event.occurredAt);
+        if (!occurred) {
           skipped += 1;
           continue;
         }
@@ -303,21 +308,23 @@ export function createShipmentService({
         throw new DomainError("limite_invalido", "max_transit_days precisa ser um inteiro entre 1 e 90.", 422);
       }
 
-      const existing = byCode(carrier, code);
-      if (existing) return { created: false, shipment: view(existing.id) };
-
+      // Cadastrar de novo também cadastra de novo no agregador (lá, código repetido não é erro). Se o
+      // agregador perdeu o código, ou uma tentativa anterior caiu no meio, repetir o POST conserta.
       try {
         await provider.register(code, carrier);
       } catch (error) {
         throw asUpstreamError(error);
       }
-      const id = newId();
-      try {
-        db.prepare(
+      // Um INSERT só, que não faz nada se o código já existe: cadastros repetidos ou simultâneos (inclusive de
+      // processos diferentes) terminam no mesmo envio.
+      const inserted = db
+        .prepare(
           `INSERT INTO shipments (id, carrier, tracking_code, campaign_id, creator_id, max_transit_days, registered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          id,
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (carrier, tracking_code) DO NOTHING`,
+        )
+        .run(
+          newId(),
           carrier,
           code,
           typeof body.campaign_id === "string" ? body.campaign_id : null,
@@ -325,13 +332,8 @@ export function createShipmentService({
           maxDays,
           clock.now().toISOString(),
         );
-      } catch (error) {
-        // Dois cadastros simultâneos do mesmo código: o segundo devolve o que o primeiro criou.
-        const raced = byCode(carrier, code);
-        if (raced) return { created: false, shipment: view(raced.id) };
-        throw error;
-      }
-      return { created: true, shipment: view(id) };
+      const shipment = byCode(carrier, code) as ShipmentRow;
+      return { created: Number(inserted.changes) === 1, shipment: view(shipment.id) };
     },
 
     async refresh(id: string) {
