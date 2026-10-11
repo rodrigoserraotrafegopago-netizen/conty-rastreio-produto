@@ -1,16 +1,18 @@
 # Rastreio do produto enviado ao criador
 
+[![ci](https://github.com/rodrigoserraotrafegopago-netizen/conty-rastreio-produto/actions/workflows/ci.yml/badge.svg)](https://github.com/rodrigoserraotrafegopago-netizen/conty-rastreio-produto/actions/workflows/ci.yml)
+
 Acompanha o pacote que a marca manda para o criador. A API cadastra o código num agregador de rastreio (fictício), consulta e recebe eventos, traduz o dialeto de cada transportadora para cinco status estáveis e avisa quando o tempo em trânsito passa do limite.
 
-Node 22 · TypeScript · Hono · SQLite (`node:sqlite`) · Vitest
+Node 22.13+ · TypeScript · Hono · SQLite (`node:sqlite`) · Vitest
 
 ```bash
 npm install
-npm test            # 35 testes
+npm test            # 40 testes
 npm run dev         # http://127.0.0.1:3007
 ```
 
-Sem `AGGREGATOR_URL`, o `npm run dev` sobe junto um agregador fictício em `/_fake-aggregator`, e o cliente HTTP fala com ele por HTTP de verdade. Outras variáveis estão em `.env.example`.
+Sem `AGGREGATOR_URL`, o `npm run dev` sobe junto um agregador fictício em `/_fake-aggregator`, e o cliente HTTP fala com ele por HTTP de verdade. Outras variáveis estão em `.env.example` (o `.env` é lido se existir). `npm run lint` e `npm run typecheck` também rodam no CI.
 
 ## Status
 
@@ -41,9 +43,9 @@ O aviso:
 
 ## Trocar de agregador
 
-`TrackingProvider` (`src/aggregator/types.ts`) define `register`, `fetchTracking` e `parseWebhook`, todos devolvendo eventos no formato interno. O formato do agregador fictício (`trackers`, `checkpoints`, `courier_status`, header `X-Api-Key`) só aparece em `src/aggregator/http-client.ts`. Os testes do serviço usam outra implementação, em memória e sem HTTP (`test/support.ts`).
+`TrackingProvider` (`src/aggregator/types.ts`) define `register`, `fetchTracking` e `parseWebhook`, todos devolvendo eventos no formato interno. O formato do agregador fictício (`trackers`, `checkpoints`, `courier_status`, header `X-Api-Key`) só aparece em `src/aggregator/http-client.ts`. Isso vale também para os nomes: o agregador chama a transportadora pelo slug dele (`alfa-log`, `beta-express`, `gama-entregas`), e o adaptador traduz para o nome interno (`alfalog` etc.) nos dois sentidos. Transportadora que o agregador manda e não está na tabela é recusada. Os testes do serviço usam outra implementação, em memória e sem HTTP (`test/support.ts`).
 
-Um checkpoint malformado é descartado e contado (`skipped_events`), sem perder os válidos. Falha do agregador vira `502` com `retryable`: `429`, `5xx` e rede caída valem nova tentativa; `401` e `404`, não.
+Um checkpoint malformado, ou com horário sem fuso (sem fuso não dá para saber o instante), é descartado e contado (`skipped_events`), sem perder os válidos. O serviço aplica a mesma regra a qualquer `TrackingProvider`, não só ao cliente HTTP. Falha do agregador vira `502` com `retryable`: `429`, `5xx` e rede caída valem nova tentativa; `401` e `404`, não.
 
 ## Endpoints
 
@@ -56,6 +58,8 @@ Um checkpoint malformado é descartado e contado (`skipped_events`), sem perder 
 | `POST` | `/jobs/check-delays` | reavalia o atraso dos envios não entregues |
 | `GET` | `/alerts?open=true` | alertas |
 
+O `POST /shipments` só responde `2xx` com o código cadastrado no agregador. Repetir o POST é seguro: cadastra de novo lá (código repetido não é erro no agregador) e devolve o envio que já existe. Isso conserta o caso em que o agregador perdeu o código, como o fictício perde ao reiniciar o servidor.
+
 ## Exemplo: payload bruto → status normalizado
 
 O agregador devolve os checkpoints fora de ordem, um deles repetido:
@@ -65,7 +69,7 @@ O agregador devolve os checkpoints fora de ordem, um deles repetido:
   "data": {
     "tracker_id": "trk_1",
     "code": "AL123456789BR",
-    "courier": "alfalog",
+    "courier": "alfa-log",
     "checkpoints": [
       { "checkpoint_id": "cp_3", "time": "2026-10-08T09:00:00-03:00", "courier_status": "04", "message": "Saiu para entrega", "city": "Rio de Janeiro", "state": "RJ" },
       { "checkpoint_id": "cp_1", "time": "2026-10-06T13:10:00-03:00", "courier_status": "01", "message": "Objeto postado", "city": "São Paulo", "state": "SP" },
@@ -105,7 +109,7 @@ Depois, chegam por webhook um evento antigo (`02`, de 07/10) e um status inventa
 ```bash
 curl -s -X POST localhost:3007/webhooks/aggregator -H 'content-type: application/json' -d '{
   "event": "tracker.updated",
-  "data": { "code": "AL123456789BR", "courier": "alfalog", "checkpoints": [
+  "data": { "code": "AL123456789BR", "courier": "alfa-log", "checkpoints": [
     { "checkpoint_id": "cp_2", "time": "2026-10-07T08:45:00-03:00", "courier_status": "02", "message": "Em transferência" },
     { "checkpoint_id": "cp_x", "time": "2026-10-07T10:00:00-03:00", "courier_status": "77", "message": "Pacote em análise especial" }
   ] }
@@ -130,13 +134,13 @@ Os dois entram no histórico, e o status continua `out_for_delivery`:
 }
 ```
 
-Para montar o cenário com o agregador fictício: cadastre o código em `POST /shipments`, mande os checkpoints um a um para `POST /_fake-aggregator/_demo/trackers/:courier/:code/checkpoints` e chame `POST /shipments/:id/refresh`.
+Para montar o cenário com o agregador fictício: cadastre o código em `POST /shipments`, mande os checkpoints um a um para `POST /_fake-aggregator/_demo/trackers/alfa-log/AL123456789BR/checkpoints` e chame `POST /shipments/:id/refresh`. O agregador fictício guarda tudo em memória: depois de reiniciar o servidor, repita o `POST /shipments` antes de mandar checkpoints.
 
 ## Testes
 
 - `rules.test.ts`: dialetos, status inventado, evento fora de ordem, retrocesso real, entregue final e regra de atraso com datas controladas (no limite, 1 ms depois, entregue no prazo e consultado semanas depois, entregue atrasado, sem eventos).
-- `shipments.test.ts`: cadastro idempotente (inclusive simultâneo), consulta repetida sem duplicar, webhook com evento antigo e repetido, alerta único, entrega normal sem alerta, alerta resolvido, job que confere o agregador antes de avisar, aviso reenviado depois de falhar, status `constructor`/`__proto__`, horário com offset, falha do agregador.
-- `http-client.test.ts`: payload bruto → interno, checkpoint malformado, cadastro repetido (`409`) e consulta contra o agregador fictício, webhook, classificação de falhas.
+- `shipments.test.ts`: cadastro idempotente (inclusive simultâneo e com o agregador fora do ar), consulta repetida sem duplicar, evento sem fuso descartado, webhook com evento antigo e repetido, alerta único, entrega normal sem alerta, alerta resolvido, job que confere o agregador antes de avisar, aviso reenviado depois de falhar, status `constructor`/`__proto__`, horário com offset, falha do agregador.
+- `http-client.test.ts`: payload bruto → interno, slug da transportadora (conhecido e desconhecido), checkpoint malformado ou sem fuso, cadastro repetido (`409`) e consulta contra o agregador fictício, recadastro depois de o agregador perder o código, webhook, classificação de falhas.
 
 ## Decisões
 
@@ -152,4 +156,4 @@ Para montar o cenário com o agregador fictício: cadastre o código em `POST /s
 
 ## Uso de IA
 
-O código, os testes e esta documentação foram escritos com o Claude (Anthropic), a partir das minhas instruções.
+O código, os testes e esta documentação foram escritos com o Claude (Anthropic), a partir das minhas instruções. Acompanhei a sessão, defini o escopo e aprovei a publicação. Não revisei o código linha a linha.
